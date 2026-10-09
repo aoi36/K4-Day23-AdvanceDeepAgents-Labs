@@ -5,6 +5,7 @@ research.py uploads this file to the sandbox and the lead agent runs it with the
 It must exit 0 and print "OK: ..." when the report is consistent, else print each problem and exit 1.
 """
 import json
+import re
 import sys
 
 REPORT = "/tmp/work/report/report.md"
@@ -12,27 +13,95 @@ SOURCES = "/tmp/work/research/sources.json"
 
 
 def check(report_text, sources):
-    """Return a list of problem strings (empty list = OK).
+    """Return a list of problem strings (empty list = OK)."""
+    problems = []
+    if not sources:
+        return ["no sources in sources.json"]
 
-    PSEUDO-CODE:
-      problems = []
-      if sources is empty: return ["no sources in sources.json"]
-      for each source entry:
-          n must be an int                       -> problem if not
-          url must start with http:// or https://-> problem if not
-          the same url must not appear twice     -> problem if duplicated
-      split report_text at the heading "## References":
-          body = text before it; if the heading is missing -> problem
-      cited = set of numbers found as [n] in the BODY only (not in the reference list; use a regex)
-      every number in `cited` must exist in sources -> problem "[n] cited but missing from sources.json"
-      every source number must be in `cited`        -> problem "source [n] never cited"
-      the lines of the References section that start with "[n]" (regex) are the reference lines:
-          every source needs exactly ONE reference line (none missing, no number twice, no number that is not a source)
-          each reference line holds exactly ONE http(s) URL and it must equal that source's url
-          (a line bundling several sources under one number is a problem)
-      return problems
-    """
-    raise NotImplementedError("TODO: implement check()")
+    source_map = {}
+    seen_urls = {}
+    for entry in sources:
+        n = entry.get("n")
+        if not isinstance(n, int):
+            problems.append(f"source entry has non-integer n: {n!r}")
+            continue
+        url = entry.get("url", "")
+        if not (url.startswith("http://") or url.startswith("https://")):
+            problems.append(f"source [{n}] has invalid url: {url!r}")
+        if url in seen_urls:
+            problems.append(f"source [{n}] has duplicate url (same as [{seen_urls[url]}]): {url}")
+        else:
+            seen_urls[url] = n
+        source_map[n] = entry
+
+    ref_split = re.split(r"(?m)^##[ \t]+References[ \t]*$", report_text)
+    if len(ref_split) < 2:
+        problems.append("missing '## References' heading")
+        body = report_text
+        ref_section = ""
+    else:
+        body = ref_split[0]
+        ref_section = ref_split[-1]
+
+    # parse body citations: handle [n], [n, m], [n-m] but not code/links
+    code_re = re.compile(r"(```.*?```|`[^`\n]*`)", re.DOTALL)
+    segments = code_re.split(body)
+    cited = set()
+    group_re = re.compile(r"\[(\d+(?:\s*[,\u2013-]\s*\d+)*)\](?!\()")
+    for i, seg in enumerate(segments):
+        if i % 2:  # code segment
+            continue
+        for m in group_re.finditer(seg):
+            for part in re.split(r"\s*,\s*", m.group(1)):
+                span = re.fullmatch(r"(\d+)\s*[\u2013-]\s*(\d+)", part)
+                if span:
+                    a, b = int(span.group(1)), int(span.group(2))
+                    if 0 <= b - a <= 200:
+                        cited.update(range(a, b + 1))
+                    else:
+                        cited.update([a, b])
+                else:
+                    cited.add(int(part))
+
+    for n in sorted(cited):
+        if n not in source_map:
+            problems.append(f"[{n}] cited but missing from sources.json")
+    for n in sorted(source_map):
+        if n not in cited:
+            problems.append(f"source [{n}] never cited")
+
+    # check reference lines
+    ref_line_re = re.compile(r"^\s*\[(\d+)\]", re.MULTILINE)
+    url_re = re.compile(r"https?://\S+")
+    ref_numbers = []
+    ref_seen = {}
+    for line in ref_section.splitlines():
+        m = ref_line_re.match(line)
+        if not m:
+            continue
+        rn = int(m.group(1))
+        ref_numbers.append(rn)
+        if rn in ref_seen:
+            problems.append(f"reference [{rn}] appears more than once")
+        ref_seen[rn] = True
+        if rn not in source_map:
+            problems.append(f"reference [{rn}] is not a source")
+        urls_in_line = url_re.findall(line)
+        # strip trailing punctuation from URLs
+        urls_in_line = [u.rstrip(")>,;.") for u in urls_in_line]
+        if len(urls_in_line) == 0:
+            problems.append(f"reference [{rn}] has no URL")
+        elif len(urls_in_line) > 1:
+            problems.append(f"reference [{rn}] has multiple URLs (must be exactly one)")
+        elif rn in source_map and urls_in_line[0] != source_map[rn].get("url", ""):
+            problems.append(f"reference [{rn}] URL mismatch: got {urls_in_line[0]}, expected {source_map[rn]['url']}")
+
+    if ref_section:
+        for n in sorted(source_map):
+            if n not in ref_seen:
+                problems.append(f"source [{n}] missing from References section")
+
+    return problems
 
 
 def main(argv):

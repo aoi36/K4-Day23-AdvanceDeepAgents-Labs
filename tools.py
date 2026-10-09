@@ -8,12 +8,14 @@ Rules for every tool:
   * the docstring is the tool description the LLM reads: keep it precise (what it does, what it returns, when to use it).
 Try your tools without any agent:   python tools.py
 """
-import json  # noqa: F401
-import os  # noqa: F401
-import time  # noqa: F401
-import xml.etree.ElementTree  # noqa: F401  (arXiv answers with Atom XML)
+import json
+import os
+import time
+import random
+import re
+import xml.etree.ElementTree as ET  # arXiv answers with Atom XML
 
-import httpx  # noqa: F401
+import httpx
 from langchain_core.tools import tool
 
 # ---- constants (given) ----
@@ -33,81 +35,186 @@ class RetryableError(Exception):
 
 # ---- TODO 1: retry helper ----
 def with_retry(fn, *, attempts=5, base=1.0, cap=30.0):
-    """Call fn(); when it raises RetryableError, wait and call it again.
-
-    PSEUDO-CODE:
-      for attempt in 0 .. attempts-1:
-          try: return fn()
-          except RetryableError as e:
-              if this was the last attempt: raise
-              delay = e.retry_after if the server told us, else exponential backoff base * 2**attempt
-              cap the delay at `cap` seconds; add random jitter to the exponential case
-              sleep(delay)
-    Use it to wrap EVERY network call below. Also treat these as retryable: HTTP 429/500/502/503/504,
-    httpx.TransportError (timeouts, connection resets). Read the Retry-After header when present.
-    """
-    raise NotImplementedError("TODO 1: with_retry")
+    """Call fn with bounded exponential backoff for RetryableError."""
+    for attempt in range(max(1, attempts)):
+        try:
+            return fn()
+        except RetryableError as exc:
+            if attempt + 1 >= attempts:
+                raise
+            delay = exc.retry_after
+            if delay is None:
+                delay = min(cap, base * (2 ** attempt)) * (0.8 + random.random() * 0.4)
+            time.sleep(min(cap, max(0.0, float(delay))))
 
 
-# ---- TODO 2: arXiv ----
+_last_arxiv_call = 0.0
+
+def _http_get(url, params=None, cap=30.0):
+    def call():
+        response = httpx.get(url, params=params, timeout=30)
+        if response.status_code in (429, 500, 502, 503, 504):
+            retry = response.headers.get("Retry-After")
+            raise RetryableError(f"HTTP {response.status_code}", float(retry) if retry and retry.isdigit() else None)
+        response.raise_for_status()
+        return response
+    return with_retry(call, cap=cap)
+
+def _compact(value, limit=600):
+    return re.sub(r"\s+", " ", str(value or "")).strip()[:limit]
+
 @tool
 def arxiv_search(query: str, max_results: int = 10) -> str:
-    """Search arXiv papers by keywords, newest first. Returns a JSON list of {id, url, published, title, summary}."""
-    # PSEUDO-CODE:
-    #   keep only word characters of `query` -> terms; no terms -> "NO RESULTS" (do not call the network)
-    #   respect arXiv etiquette: at least 3 seconds between two arXiv calls (remember the time of the last call)
-    #   GET ARXIV_URL params: search_query="all:t1 AND all:t2 ...", sortBy=submittedDate, sortOrder=descending,
-    #       max_results=clamp(max_results, 1, 30)           (wrap in with_retry)
-    #   parse the Atom XML: each <entry> -> {id (last part of <id> after /abs/), url, published[:10], title, summary}
-    #       collapse whitespace/newlines in title and summary; cut summary to ~600 chars
-    #   no entries -> "NO RESULTS"; else json.dumps(records, ensure_ascii=False)
-    #   any exception -> "ERROR: <type>: <message>"
-    raise NotImplementedError("TODO 2: arxiv_search")
+    """Search arXiv papers by keywords, newest first. Returns compact JSON records."""
+    global _last_arxiv_call
+    try:
+        terms = re.findall(r"[A-Za-z0-9]+", query)
+        if not terms:
+            return "NO RESULTS"
+        wait = 3.0 - (time.monotonic() - _last_arxiv_call)
+        if wait > 0:
+            time.sleep(wait)
+        _last_arxiv_call = time.monotonic()
+        response = _http_get(ARXIV_URL, {"search_query": " AND ".join(f"all:{t}" for t in terms), "sortBy": "submittedDate", "sortOrder": "descending", "max_results": max(1, min(int(max_results), 30))}, 60.0)
+        root = ET.fromstring(response.text)
+        ns = {"a": "http://www.w3.org/2005/Atom"}
+        records = []
+        for entry in root.findall("a:entry", ns):
+            raw_id = (entry.findtext("a:id", namespaces=ns) or "").rstrip("/").split("/abs/")[-1]
+            paper_id = re.sub(r"v\d+$", "", raw_id)
+            if not paper_id:
+                continue
+            records.append({"id": paper_id, "url": f"https://arxiv.org/abs/{paper_id}", "published": (entry.findtext("a:published", namespaces=ns) or "")[:10], "title": _compact(entry.findtext("a:title", namespaces=ns), 300), "summary": _compact(entry.findtext("a:summary", namespaces=ns))})
+        return json.dumps(records, ensure_ascii=False) if records else "NO RESULTS"
+    except Exception as exc:
+        return f"ERROR: {type(exc).__name__}: {exc}"
 
 
 # ---- TODO 3: Hugging Face ----
+def _hf_records(items, prefer_ai=False):
+    records = []
+    for item in items if isinstance(items, list) else []:
+        paper = item.get("paper") or item
+        paper_id = paper.get("id")
+        if not paper_id:
+            continue
+        records.append({"id": paper_id, "url": f"https://huggingface.co/papers/{paper_id}", "published": (paper.get("publishedAt") or item.get("publishedAt") or "")[:10], "title": _compact(paper.get("title") or item.get("title"), 300), "summary": _compact((paper.get("ai_summary") if prefer_ai else None) or paper.get("summary") or item.get("summary")), "upvotes": paper.get("upvotes", 0) or 0, "github": paper.get("githubRepo", ""), "stars": paper.get("githubStars", 0) or 0})
+    return records
+
+def _hf_call(url, params):
+    return _http_get(url, params).json()
+
 @tool
 def hf_daily_papers(limit: int = 30, date: str = "", keyword: str = "") -> str:
-    """Hugging Face Daily Papers = what is trending in AI research. Returns a JSON list of
-    {id, url, published, title, summary, upvotes, github, stars} sorted by upvotes. `date` is YYYY-MM-DD (empty = latest).
-    `keyword` filters title/summary; there is no topic search on this endpoint (use hf_search_papers for a topic)."""
-    # PSEUDO-CODE:
-    #   GET HF_DAILY_URL params: limit (clamp 1..100) and date (only when given)      (with_retry)
-    #   response = list of items {"paper": {id, title, summary, upvotes, githubRepo, githubStars, publishedAt}, ...}
-    #   map every item to the record shape above (skip items without paper.id); url = https://huggingface.co/papers/<id>
-    #   keyword -> keep records whose title+summary contains it (case-insensitive); sort by upvotes descending
-    raise NotImplementedError("TODO 3: hf_daily_papers")
-
+    """Return trending Hugging Face Daily Papers as compact JSON records."""
+    try:
+        params = {"limit": max(1, min(int(limit), 100))}
+        if date:
+            params["date"] = date
+        records = _hf_records(_hf_call(HF_DAILY_URL, params))
+        if keyword:
+            records = [r for r in records if keyword.lower() in (r["title"] + " " + r["summary"]).lower()]
+        records.sort(key=lambda r: r["upvotes"], reverse=True)
+        return json.dumps(records, ensure_ascii=False) if records else "NO RESULTS"
+    except Exception as exc:
+        return f"ERROR: {type(exc).__name__}: {exc}"
 
 @tool
 def hf_search_papers(query: str, limit: int = 10) -> str:
-    """Search Hugging Face papers by topic. Returns a JSON list of
-    {id, url, published, title, summary, upvotes, github, stars}."""
-    # PSEUDO-CODE:
-    #   GET HF_SEARCH_URL params: q=query, limit (clamp 1..50)                         (with_retry)
-    #   same item shape as the daily endpoint; prefer paper["ai_summary"] over paper["summary"] when present
-    raise NotImplementedError("TODO 3: hf_search_papers")
+    """Search Hugging Face papers by topic and return compact JSON records."""
+    try:
+        if not query.strip():
+            return "NO RESULTS"
+        records = _hf_records(_hf_call(HF_SEARCH_URL, {"q": query, "limit": max(1, min(int(limit), 50))}), prefer_ai=True)
+        return json.dumps(records, ensure_ascii=False) if records else "NO RESULTS"
+    except Exception as exc:
+        return f"ERROR: {type(exc).__name__}: {exc}"
 
 
 # ---- TODO 4: web search / fetch through the Exa MCP endpoint ----
+def _call_exa(tool_name: str, arguments: dict) -> str:
+    api_key = os.getenv("EXA_API_KEY", "").strip()
+    url = f"{EXA_URL}?exaApiKey={api_key}" if api_key else EXA_URL
+
+    def call():
+        try:
+            resp = httpx.post(
+                url,
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool_name, "arguments": arguments}},
+                headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"},
+                timeout=30.0,
+            )
+        except httpx.TransportError as e:
+            raise RetryableError(f"Transport error: {e}")
+
+        if resp.status_code in (429, 500, 502, 503, 504):
+            ra = resp.headers.get("Retry-After")
+            retry_after = float(ra) if ra and ra.replace(".", "", 1).isdigit() else None
+            raise RetryableError(f"HTTP {resp.status_code}", retry_after=retry_after)
+
+        resp.raise_for_status()
+
+        result = None
+        for line in resp.text.splitlines():
+            line = line.strip()
+            if line.startswith("data:"):
+                payload = json.loads(line[5:].strip())
+                if "error" in payload:
+                    raise RuntimeError(f"JSON-RPC error: {payload['error']}")
+                result = payload.get("result", {})
+                break
+
+        if result is None:
+            raise RuntimeError("Empty response from Exa MCP")
+
+        meta = result.get("_meta", {})
+        meta_str = json.dumps(meta).lower()
+        if "rate" in meta_str or "limit" in meta_str:
+            raise RetryableError("Exa rate limited", retry_after=20.0)
+
+        if result.get("isError"):
+            if "rate" in str(result).lower():
+                raise RetryableError("Exa rate limited", retry_after=20.0)
+            raise RuntimeError(f"Exa error: {result}")
+
+        texts = [c.get("text", "") for c in result.get("content", []) if c.get("type") == "text"]
+        joined = "\n\n".join(texts).strip()
+        lowered = joined.lower()
+        if "rate limit" in lowered and ("exceeded" in lowered or "try again" in lowered or "api key" in lowered or "429" in lowered):
+            raise RetryableError("Exa rate limited", retry_after=20.0)
+
+        return joined
+
+    def safe_error(msg: str) -> str:
+        if api_key:
+            msg = msg.replace(api_key, "[REDACTED]")
+        return msg
+
+    try:
+        text = with_retry(call, attempts=5, cap=60.0)
+        return text if text else "NO RESULTS"
+    except Exception as exc:
+        return f"ERROR: {type(exc).__name__}: {safe_error(str(exc))}"
+
+
 @tool
 def web_search(query: str, objective: str = "", num_results: int = 5) -> str:
     """Search the web (Exa). Describe the ideal page in natural language. Returns clean text of the top results with URLs."""
-    # PSEUDO-CODE:
-    #   call the MCP tool "web_search_exa" with arguments {query, objective, numResults}
-    #       (objective is REQUIRED by Exa: when empty, build one from the query)
-    #   see GUIDE.md part 1.4 for how to call an MCP server over plain HTTP (JSON-RPC "tools/call") and read the answer
-    #   read optional env EXA_API_KEY; when present it is sent to the Exa endpoint.
-    #       (see GUIDE.md 1.4 for where it goes) => the key then appears in exception text: redact it before returning "ERROR: ..."
-    #   WATCH OUT: read GUIDE.md 1.4 about how Exa signals "rate limited" on the free tier, and retry on it
-    raise NotImplementedError("TODO 4: web_search")
+    if not query.strip():
+        return "NO RESULTS"
+    obj = objective.strip() or f"Find high-quality information about {query.strip()}"
+    return _call_exa("web_search_exa", {"query": query, "objective": obj, "numResults": max(1, min(int(num_results), 10))})
 
 
 @tool
 def web_fetch(url: str) -> str:
     """Read the full content of one web page (e.g. an arXiv abstract page) as markdown. Long pages are truncated."""
-    # PSEUDO-CODE: MCP tool "web_fetch_exa" with arguments {"urls": [url]}; truncate the text to ~12000 chars
-    raise NotImplementedError("TODO 4: web_fetch")
+    if not url.strip():
+        return "NO RESULTS"
+    res = _call_exa("web_fetch_exa", {"urls": [url.strip()]})
+    if res.startswith("ERROR:") or res == "NO RESULTS":
+        return res
+    return res[:12000]
 
 
 # ---- TODO 5: registry (the researcher subagent gets exactly these) ----

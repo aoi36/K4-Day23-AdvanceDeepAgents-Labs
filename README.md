@@ -59,14 +59,27 @@ Lab/
 └── reports/                  báo cáo sinh ra (bạn commit vào repo nộp)
 ```
 
-Mỗi tệp "SINH VIÊN CÀI ĐẶT" là **pseudo-code chạy được** (import được): các hàm có docstring mô tả việc cần làm, các `TODO n` đánh số theo `GUIDE.md`, thân hàm đang `raise NotImplementedError`.
+Các tệp `tools.py`, `agents.py`, `research.py` và `check_citations.py` đã được cài đặt. `GUIDE.md` giải thích yêu cầu của từng phần. Báo cáo không có sẵn: agent phải tạo chúng trong một lần chạy thành công.
 
 ## 4. Cài đặt
 
-```bash
-python3 -m venv .venv && source .venv/bin/activate      # Python 3.11+
-pip install -r requirements.txt
-cp .env.example .env                                     # rồi điền khóa CỦA BẠN
+### Windows PowerShell (Python 3.11+)
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+# Chỉ sao chép nếu chưa có .env; không ghi đè cấu hình hiện tại.
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+```
+
+Điền cấu hình thật vào `.env` trước khi chạy. Giá trị `openai:<model name>` trong mẫu chỉ là placeholder, không phải tên mô hình hợp lệ. Nếu môi trường ảo đã được kích hoạt (terminal hiện `(.venv)`), không cần tạo lại nó.
+
+Nếu PowerShell không cho kích hoạt môi trường ảo, dùng trực tiếp Python của nó, không cần đổi execution policy:
+
+```powershell
+& .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+& .\.venv\Scripts\python.exe research.py "survey about world model"
 ```
 
 Bạn cần ba loại khóa (điền vào `.env`, **không bao giờ commit** `.env`):
@@ -77,20 +90,53 @@ Bạn cần ba loại khóa (điền vào `.env`, **không bao giờ commit** `.
 | `DAYTONA_API_KEY` | https://app.daytona.io | Kiểm tra gói miễn phí / credit hiện hành. Không có tài khoản hoặc hết credit: đặt `SANDBOX=docker` để chạy sandbox trong container Docker cục bộ (xem `.env.example`). |
 | `EXA_API_KEY` (khuyến nghị) | https://dashboard.exa.ai/api-keys | Có thể chạy không khóa, nhưng bản miễn phí của MCP bị giới hạn tốc độ rất nhanh. |
 
-## 5. Làm bài
+## 5. Chạy và đọc báo cáo
 
-Làm theo thứ tự (chi tiết trong `GUIDE.md`):
+Sau khi cấu hình `.env`, chạy từ thư mục gốc của repo:
 
-1. `check_citations.py`: khởi động nhẹ, thuần Python.
-2. `tools.py`: viết `with_retry` và 5 công cụ. Thử riêng từng công cụ: `python tools.py`.
-3. `agents.py`: viết prompt, subagent và lead agent.
-4. `research.py`: ghép tất cả; chạy một chủ đề:
-
-```bash
+```powershell
 python research.py "survey about world model"
 ```
 
-Kết quả nằm ở `reports/survey-about-world-model.md` cùng `.sources.json` và `.meta.json`.
+**Không cần tạo `report.md` trước. Đây là đầu ra, không phải đầu vào.** Agent phải ghi `/tmp/work/report/report.md` và `/tmp/work/research/sources.json` bên trong sandbox, chạy finalizer và validator, rồi chương trình tải kết quả về máy.
+
+Một lần chạy thành công in `Report saved to: ...` và tạo ba tệp:
+
+| Tệp | Nội dung |
+|---|---|
+| `reports/survey-about-world-model.md` | Báo cáo tiếng Anh, các trích dẫn `[n]` và danh sách References |
+| `reports/survey-about-world-model.sources.json` | Nguồn tương ứng với từng số trích dẫn |
+| `reports/survey-about-world-model.meta.json` | Chủ đề, mô hình, thời gian, số lần gọi tool/subagent, token của lead và họ nguồn |
+
+Kiểm tra trích dẫn sau khi đã có báo cáo:
+
+```powershell
+python check_citations.py .\reports\survey-about-world-model.md .\reports\survey-about-world-model.sources.json
+```
+
+### Lỗi `FAILED: report.md is missing or empty`
+
+Lỗi này phát sinh ở bước tải đầu ra: chương trình không nhận được nội dung báo cáo từ sandbox. Nó **không có nghĩa là bạn phải tạo một tệp `report.md` trên máy**. Các khả năng gồm agent kết thúc trước bước viết, ghi sai đường dẫn, thao tác ghi thất bại, hoặc tải tệp thất bại. Chỉ thông báo này chưa đủ để xác định nguyên nhân.
+
+1. **Kiểm tra mô hình**: `LAB_MODEL` phải là tên thật và endpoint phải hỗ trợ tool calling, không chỉ trả lời văn bản. Lead cần gọi `task`, các công cụ tệp và `execute`. Agent chỉ trả lời trong chat thì chưa tạo báo cáo.
+2. **Kiểm tra nguồn độc lập với agent**:
+
+   ```powershell
+   python tools.py
+   ```
+
+   Lệnh này gọi API thật, có thể mất thời gian vì retry. Tìm kết quả `ERROR:` hoặc `NO RESULTS`; nếu Exa liên tục giới hạn tốc độ, cấu hình `EXA_API_KEY`. Không coi thông báo giới hạn tốc độ là nội dung nghiên cứu.
+3. **Kiểm tra sandbox**: Daytona cần khóa hợp lệ và credit. Nếu dùng Docker, Docker Desktop phải đang chạy, đặt `SANDBOX=docker` trong `.env`, rồi kiểm tra:
+
+   ```powershell
+   docker info
+   ```
+
+4. **Đọc lỗi chi tiết**: chương trình kiểm tra đầu ra trong sandbox và cho agent tiếp tục tối đa một lần nếu công việc chưa hoàn tất. Nếu mô hình không gọi tool, chương trình báo `agent made no tool calls`; nếu kiểm tra trích dẫn thất bại, lỗi kèm kết quả validator và phản hồi cuối của agent; lỗi tải tệp được báo riêng. Lần tiếp tục có thể tốn thêm token. Không tăng giới hạn tự động. Chạy kiểm tra offline cho luồng này bằng `python test_research.py`.
+   Với Gemini, phản hồi rỗng có thể mang `finish_reason=MALFORMED_FUNCTION_CALL`: mô hình có hỗ trợ tool calling nhưng sinh lời gọi không hợp lệ cho bộ công cụ của agent. Chương trình thử sửa một lần và hiển thị finish reason khi vẫn thất bại. Nếu lỗi lặp lại, chọn một mô hình hỗ trợ tool calling khác trong `.env`; đừng tạo `report.md` thủ công hoặc tăng giới hạn để che lỗi này.
+5. **Sau khi sửa nguyên nhân**, chạy lại lệnh nghiên cứu. Việc chạy lại tốn token và thời gian sandbox; không tăng giới hạn hoặc thử lặp vô hạn khi chưa có bằng chứng.
+
+Sandbox được dọn khi chương trình kết thúc, kể cả khi chạy lỗi; ghi chú của lần chạy lỗi không được lưu về máy theo luồng hiện tại. Không tạo báo cáo rỗng, không sửa tay báo cáo để vượt kiểm tra, và không chạy validator trước khi có đủ hai tệp đầu ra. Xem thêm [GUIDE.md, Phần 5](GUIDE.md#5-chạy-5-chủ-đề-và-xử-lý-sự-cố).
 
 ## 6. Chủ đề và nộp bài
 
@@ -98,6 +144,18 @@ Kết quả nằm ở `reports/survey-about-world-model.md` cùng `.sources.json
 - Commit mã nguồn và toàn bộ `reports/`, đẩy lên một **public repo** GitHub và nộp link.
 - Kiểm tra trước khi nộp: chạy **`python self_check.py`** (không tốn token): nó kiểm tra đủ 5 báo cáo, `meta.json`, trích dẫn bằng `check_citations.py` của bạn, và không có `.env`/khóa nào trong git.
 - Cách chấm: xem [`RUBRIC.md`](RUBRIC.md).
+
+## Local Ollama timeouts
+
+When `LAB_BASE_URL` (or `OPENAI_ENDPOINT`) points to localhost, research allows 600 seconds per model request and disables automatic retries. Hosted providers retain their existing timeout/retry settings. CPU-only models may be slow, especially with parallel researchers. Inspect `http://localhost:11434/api/ps`: `size_vram: 0` indicates no model weights loaded on GPU. A longer timeout is not a speed improvement; use GPU acceleration or a smaller tool-capable model if needed.
+
+## Small requests for restricted API tiers
+
+Lead and subagents now send only the initial task and newest complete tool-call exchanges that fit a conservative 18,000-byte request budget, including system instructions and shortened tool descriptions. Full conversation history remains in agent state; research notes remain in sandbox files. Output is capped at 1,000 tokens per call, so reports should be written section by section. Oversized tool results are sent as explicitly marked previews, preserving all tool-call IDs and the full original results in agent state. The agent must retrieve smaller slices or fewer results before using omitted evidence. Oversized initial tasks or tool-call arguments still fail explicitly. Run `python test_research.py` for offline checks.
+
+If Groq rejects an invented tool name (for example `exec` instead of `execute`), the middleware retries once with the registered tool names. Other 400 errors, quota failures, and network errors are not retried by this correction.
+
+This is bounded context, not lossless document chunking or an exact provider token count. Groq's shared TPM quota still applies across concurrent subagents; smaller requests do not guarantee that a full research run fits the free tier.
 
 ## 7. Thời gian, chi phí và an toàn
 
