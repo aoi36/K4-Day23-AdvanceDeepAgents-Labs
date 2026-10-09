@@ -1,0 +1,26 @@
+{
+  "topic": "survey about world model",
+  "status": "reference-only",
+  "pipeline_generated": false,
+  "provenance": "Prepared directly by an assistant from retrieved public sources; not produced by a successful research.py run.",
+  "model": null,
+  "elapsed_s": null,
+  "subagent_calls": null,
+  "tool_calls": null,
+  "tokens": {
+    "input": null,
+    "output": null
+  },
+  "n_sources": 5,
+  "source_families": [
+    "arxiv",
+    "web"
+  ],
+  "submission_ready": false,
+  "limitations": [
+    "Agent-run statistics were not measured.",
+    "Only two source families are represented.",
+    "Selected publications cover 2018 through 2024, not a complete 2026 survey.",
+    "This metadata is descriptive and is not compatible with self_check.py's numeric run-statistics requirements."
+  ]
+}

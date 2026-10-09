@@ -1,0 +1,7 @@
+[
+  {"n": 1, "id": "1803.10122", "url": "https://arxiv.org/abs/1803.10122", "title": "World Models", "date": "2018-03-27", "source": "arxiv"},
+  {"n": 2, "id": "1912.01603", "url": "https://arxiv.org/abs/1912.01603", "title": "Dream to Control: Learning Behaviors by Latent Imagination", "date": "2019-12-03", "source": "arxiv"},
+  {"n": 3, "id": "2301.04104", "url": "https://arxiv.org/abs/2301.04104", "title": "Mastering Diverse Domains through World Models", "date": "2023-01-10", "source": "arxiv"},
+  {"n": 4, "id": "2402.15391", "url": "https://huggingface.co/papers/2402.15391", "title": "Genie: Generative Interactive Environments", "date": "2024-02-23", "source": "web"},
+  {"n": 5, "id": "2402.08268", "url": "https://arxiv.org/abs/2402.08268", "title": "World Model on Million-Length Video And Language With Blockwise RingAttention", "date": "2024-02-13", "source": "arxiv"}
+]
